@@ -1,0 +1,42 @@
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Variables privadas
+.env
+.env.*
+
+# Base de datos local
+*.db
+*.sqlite
+*.sqlite3
+
+# Copias de seguridad
+*_backup*.py
+
+# Flutter
+wise_wallet/.dart_tool/
+wise_wallet/.flutter-plugins
+wise_wallet/.flutter-plugins-dependencies
+wise_wallet/.packages
+wise_wallet/build/
+wise_wallet/.metadata
+
+# Android
+wise_wallet/android/.gradle/
+wise_wallet/android/local.properties
+
+# IDE
+.vscode/
+.idea/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Postman
+.postman/
+postman/
