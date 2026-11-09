@@ -11,7 +11,16 @@ class ApiService {
   // DIRECCION DEL BACKEND
   // ==========================================
 
+  static const String _productionUrl = 'https://wise-wallet-api.onrender.com';
+
   static String get baseUrl {
+    const configuredUrl = String.fromEnvironment('API_BASE_URL');
+
+    if (configuredUrl.isNotEmpty) {
+      return configuredUrl;
+    }
+
+    // Desarrollo local
     if (kIsWeb) {
       return 'http://127.0.0.1:5000';
     }
@@ -20,7 +29,7 @@ class ApiService {
       return 'http://192.168.1.7:5000';
     }
 
-    return 'http://127.0.0.1:5000';
+    return _productionUrl;
   }
 
   // ==========================================

@@ -62,6 +62,12 @@ if DATABASE_URL:
 
     app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 
+    # Mantener conexiones PostgreSQL saludables
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+        "pool_pre_ping": True,
+        "pool_recycle": 300
+    }
+
 else:
     # SQLite para desarrollo local
     app.config["SQLALCHEMY_DATABASE_URI"] = (
@@ -75,7 +81,6 @@ CORS(app)
 db = SQLAlchemy(app)
 
 serializer = URLSafeTimedSerializer(app.config["SECRET_KEY"])
-
 
 # ==========================================
 # MODELO DE USUARIO
