@@ -4,6 +4,8 @@ from functools import wraps
 from datetime import date, datetime
 import math
 import os
+import json
+from sqlalchemy import inspect
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -18,6 +20,8 @@ from werkzeug.security import (
     generate_password_hash,
     check_password_hash
 )
+from google import genai
+from google.genai import errors as genai_errors
 
 
 # ==========================================
@@ -38,6 +42,19 @@ if not SECRET_KEY or len(SECRET_KEY) < 32:
     )
 
 app.config["SECRET_KEY"] = SECRET_KEY
+
+# ==========================================
+# CONFIGURACION DE GEMINI
+# ==========================================
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+
+gemini_client = (
+    genai.Client(api_key=GEMINI_API_KEY)
+    if GEMINI_API_KEY
+    else None
+)
 
 # ==========================================
 # CONFIGURACION DE BASE DE DATOS
@@ -170,6 +187,12 @@ class UserProfile(db.Model):
     main_challenge = db.Column(db.String(120), nullable=False)
     savings_goal = db.Column(db.String(100), nullable=True)
 
+    savings_accumulated = db.Column(
+    db.Float,
+    nullable=False,
+    default=0
+)
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -181,6 +204,7 @@ class UserProfile(db.Model):
             "saving_habit": self.saving_habit,
             "main_challenge": self.main_challenge,
             "savings_goal": self.savings_goal,
+            "savings_accumulated": self.savings_accumulated,
             "completed": True
         }
 
@@ -830,8 +854,10 @@ def get_profile():
 # CREAR O ACTUALIZAR PERFIL FINANCIERO
 # ==========================================
 
+
 @app.put("/api/profile")
 @token_required
+
 def save_profile():
 
     data = request.get_json(silent=True)
@@ -868,6 +894,32 @@ def save_profile():
             "message": "La meta de ahorro debe ser texto"
         }), 400
 
+    profile = UserProfile.query.filter_by(
+        user_id=request.current_user.id
+    ).first()
+
+    accumulated_value = data.get(
+        "savings_accumulated",
+        profile.savings_accumulated if profile else 0
+    )
+
+    if isinstance(accumulated_value, bool):
+        return jsonify({
+            "message": "El ahorro acumulado debe ser un numero valido"
+        }), 400
+
+    try:
+        accumulated_value = float(accumulated_value)
+    except (ValueError, TypeError):
+        return jsonify({
+            "message": "El ahorro acumulado debe ser un numero valido"
+        }), 400
+
+    if not math.isfinite(accumulated_value) or accumulated_value < 0:
+        return jsonify({
+            "message": "El ahorro acumulado no puede ser negativo"
+        }), 400
+
     profile_data = {
         "occupation": data["occupation"].strip(),
         "financial_goal": data["financial_goal"].strip(),
@@ -875,7 +927,8 @@ def save_profile():
         "monthly_expense_range": data["monthly_expense_range"].strip(),
         "saving_habit": data["saving_habit"].strip(),
         "main_challenge": data["main_challenge"].strip(),
-        "savings_goal": optional_goal.strip()
+        "savings_goal": optional_goal.strip(),
+        "savings_accumulated": accumulated_value
     }
 
     limits = {
@@ -888,22 +941,17 @@ def save_profile():
         "savings_goal": 100
     }
 
-    for field, value in profile_data.items():
-        if len(value) > limits[field]:
+    for field, limit in limits.items():
+        if len(profile_data[field]) > limit:
             return jsonify({
                 "message": f"El campo {field} supera la longitud permitida"
             }), 400
-
-    profile = UserProfile.query.filter_by(
-        user_id=request.current_user.id
-    ).first()
 
     if profile is None:
         profile = UserProfile(
             user_id=request.current_user.id,
             **profile_data
         )
-
         db.session.add(profile)
 
     else:
@@ -1094,13 +1142,344 @@ def delete_obligation(obligation_id):
     }), 200
 
 
+
+# ==========================================
+# ASISTENTE FINANCIERO CON INTELIGENCIA ARTIFICIAL
+# ==========================================
+
+@app.post("/api/chatbot")
+@token_required
+def chatbot():
+    # Verificar que la API Key de Gemini este configurada.
+    if gemini_client is None:
+        return jsonify({
+            "message": "El asistente de IA no esta configurado en el servidor"
+        }), 503
+
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({
+            "message": "Debes enviar un JSON valido"
+        }), 400
+
+    user_message = data.get("message")
+
+    if not isinstance(user_message, str) or not user_message.strip():
+        return jsonify({
+            "message": "Escribe una pregunta para el asistente"
+        }), 400
+
+    user_message = user_message.strip()
+
+    if len(user_message) > 2000:
+        return jsonify({
+            "message": "El mensaje no puede superar los 2000 caracteres"
+        }), 400
+
+    user_id = request.current_user.id
+
+    try:
+        # Consultar unicamente la informacion del usuario autenticado.
+        profile = UserProfile.query.filter_by(
+            user_id=user_id
+        ).first()
+
+        transaction_summary = (
+            db.session.query(
+                Transaction.transaction_type,
+                Transaction.category,
+                db.func.sum(Transaction.amount).label("total"),
+                db.func.count(Transaction.id).label("quantity")
+            )
+            .filter_by(user_id=user_id)
+            .group_by(
+                Transaction.transaction_type,
+                Transaction.category
+            )
+            .all()
+        )
+
+        recent_transactions = (
+            Transaction.query
+            .filter_by(user_id=user_id)
+            .order_by(Transaction.id.desc())
+            .limit(30)
+            .all()
+        )
+
+        obligations = (
+            PaymentObligation.query
+            .filter_by(user_id=user_id)
+            .order_by(PaymentObligation.due_date.asc())
+            .limit(30)
+            .all()
+        )
+
+        financial_context = {
+            "perfil_financiero": profile.to_dict() if profile else None,
+            "resumen_transacciones_por_tipo_y_categoria": [
+                {
+                    "tipo": row.transaction_type,
+                    "categoria": row.category,
+                    "total": round(float(row.total or 0), 2),
+                    "cantidad": int(row.quantity)
+                }
+                for row in transaction_summary
+            ],
+            "ultimas_transacciones": [
+                {
+                    "descripcion": transaction.description,
+                    "monto": transaction.amount,
+                    "categoria": transaction.category,
+                    "tipo": transaction.transaction_type
+                }
+                for transaction in recent_transactions
+            ],
+            "obligaciones": [
+                {
+                    "titulo": obligation.title,
+                    "descripcion": obligation.description,
+                    "monto": obligation.amount,
+                    "categoria": obligation.category,
+                    "fecha_vencimiento": obligation.due_date.isoformat(),
+                    "estado": obligation.status,
+                    "vencida": (
+                        obligation.status == "pendiente"
+                        and obligation.due_date < date.today()
+                    )
+                }
+                for obligation in obligations
+            ]
+        }
+
+
+
+        system_instructions = """
+Eres Wise Assistant, el asistente financiero educativo de Wise Wallet.
+Responde siempre en español, con un tono amable, natural, claro y respetuoso.
+
+OBJETIVO
+Ayuda al usuario a comprender sus finanzas, identificar aspectos importantes
+y tomar decisiones informadas utilizando exclusivamente los datos disponibles.
+
+USO DEL PERFIL FINANCIERO
+El contexto puede incluir un perfil financiero registrado por el usuario.
+Utiliza esta información para personalizar tus respuestas y recomendaciones.
+
+- Ocupación: adapta los ejemplos y explicaciones a la situación del usuario
+  cuando sea relevante, sin hacer suposiciones sobre sus ingresos.
+- Objetivo financiero: relaciona las recomendaciones con el propósito que
+  el usuario desea alcanzar.
+- Rango de ingresos: tenlo en cuenta para orientar sugerencias realistas,
+  pero recuerda que es un rango declarado y no un ingreso exacto comprobado.
+- Rango de gastos: úsalo como referencia general, sin asumir que representa
+  todos los gastos reales del usuario.
+- Hábito de ahorro: adapta las recomendaciones al nivel de experiencia
+  y constancia que el usuario declara.
+- Principal desafío financiero: prioriza consejos relacionados con esa
+  dificultad cuando la pregunta lo permita.
+- Meta de ahorro: tenla presente al hablar de planificación y objetivos.
+  Si contiene una cantidad identificable, puedes mencionarla respetando
+  el valor registrado. Si es un texto ambiguo, no inventes una cantidad.
+
+USO DEL AHORRO ACUMULADO Y LA META DE AHORRO
+
+- Utiliza el campo savings_accumulated del perfil financiero como el ahorro acumulado que el usuario declara tener actualmente.
+- Este valor es informado manualmente por el usuario. No lo presentes como un saldo bancario verificado.
+- Compara savings_accumulated con savings_goal cuando la meta contenga una cantidad monetaria que pueda identificarse claramente.
+- Si ambos valores son válidos y la meta es mayor que cero, calcula cuánto falta para alcanzar la meta restando el ahorro acumulado a la meta. Si el resultado es negativo, indica que la meta ya fue alcanzada o superada.
+- Calcula el porcentaje de avance dividiendo el ahorro acumulado entre la meta y multiplicando por 100.
+- Si el porcentaje supera el 100 %, puedes indicar que el usuario superó su meta, sin presentar un avance limitado al 100 % como si fuera el valor real.
+- Si la meta no contiene una cantidad monetaria clara o el ahorro acumulado no está disponible, no inventes cifras ni porcentajes.
+- No calcules el ahorro acumulado restando los gastos registrados a los ingresos registrados.
+- No confundas el ahorro acumulado con dinero disponible para gastar.
+- Antes de recomendar aumentar el ahorro, considera las obligaciones pendientes y vencidas. Prioriza las obligaciones urgentes cuando corresponda.
+- Propón recomendaciones graduales y realistas para mantener o aumentar el ahorro, teniendo en cuenta el hábito de ahorro y la principal dificultad del usuario.
+- Utiliza separadores de miles con puntos y el símbolo $ en todas las cantidades monetarias.
+
+REGLAS PARA PERSONALIZAR RECOMENDACIONES
+- No repitas todos los datos del perfil en cada respuesta.
+- Utiliza únicamente los datos que sean relevantes para la pregunta.
+- Si el usuario tiene una meta de ahorro, orienta las recomendaciones
+  hacia ella sin asegurar que pueda alcanzarla en un plazo determinado.
+- Si declara dificultades para ahorrar, ofrece pasos pequeños y realistas.
+- Si su principal desafío son las deudas, prioriza la revisión de obligaciones
+  y compromisos pendientes antes de sugerir nuevos ahorros.
+- Si sus ingresos son variables o limitados, evita recomendar cantidades
+  fijas de ahorro sin información suficiente.
+- Si el objetivo financiero es comprar algo, viajar, estudiar o pagar deudas,
+  adapta las sugerencias a ese objetivo.
+- No confundas los rangos declarados en el perfil con los totales calculados
+  a partir de las transacciones.
+- Si el perfil no existe o algún campo está vacío, no inventes información.
+- Si el usuario actualiza su perfil, utiliza los datos más recientes que
+  aparezcan en el contexto financiero.
+
+REGLAS FINANCIERAS
+- Utiliza únicamente la información del contexto financiero proporcionado.
+- No inventes movimientos, ingresos, gastos, fechas, saldos ni cálculos.
+- Distingue los ingresos propios, como salarios, del dinero recibido mediante
+  préstamos. Un préstamo recibido no es salario ni ganancia.
+- No reclasifiques ni modifiques los movimientos registrados.
+- Separa los gastos registrados de las obligaciones pendientes.
+- No sumes obligaciones pendientes al total de gastos.
+- No cuentes dos veces una obligación pagada si podría estar representada
+  en una transacción.
+- Las transacciones no tienen fechas. No afirmes tendencias, promedios,
+  presupuestos mensuales ni comportamientos por periodos.
+- Puedes mencionar las fechas de vencimiento de las obligaciones.
+- No supongas que los registros representan todos los movimientos del usuario.
+- No calcules dinero disponible para gastar o ahorrar si faltan datos para
+  hacerlo de forma segura.
+- Si no hay información suficiente, explícalo brevemente.
+- No afirmes que puedes crear, modificar o eliminar registros.
+- Nunca solicites contraseñas, claves bancarias ni datos completos de tarjetas.
+- No recomiendes inversiones específicas ni prometas rendimientos.
+- Tus respuestas son educativas y no sustituyen asesoramiento financiero
+  profesional.
+
+FORMATO DE LAS CANTIDADES
+- Presenta las cantidades monetarias con el símbolo $ y puntos como
+  separadores de miles.
+- Ejemplo: $3.400.000, $150.000, $85.000 y $235.650.
+- No presentes cantidades monetarias como 3400000 o 150000.
+- Conserva los valores exactos registrados; no redondees ni alteres montos.
+- No apliques formato monetario a fechas, cantidades de movimientos o
+  porcentajes.
+- Si el contexto no permite confirmar una moneda, no inventes una distinta.
+
+ESTILO DE RESPUESTA
+- Responde siempre en español.
+- Utiliza texto sencillo, sin Markdown, asteriscos, negritas ni bloques de código.
+- Organiza las respuestas con títulos cortos cuando ayuden a comprender
+  la información.
+- Separa los temas en párrafos breves.
+- Evita párrafos largos y explicaciones repetitivas.
+- Responde primero la pregunta concreta del usuario.
+- Incluye únicamente los datos y explicaciones relevantes para esa pregunta.
+- Cuando presentes recomendaciones, prioriza las más importantes y explica
+  brevemente por qué son útiles.
+- No repitas el saludo ni te presentes en cada respuesta.
+- No añadas advertencias genéricas al final de todas las respuestas.
+- Evita repetir información que ya explicaste en la misma respuesta.
+- Mantén un lenguaje cercano, profesional y fácil de entender.
+
+RECOMENDACIONES
+- Ofrece sugerencias realistas y relacionadas con la información disponible.
+- Considera las obligaciones pendientes antes de recomendar ahorrar o gastar.
+- No propongas cantidades de ahorro sin datos suficientes para justificarlas.
+- No conviertas cada respuesta en una lista de recomendaciones si el usuario
+  solo solicita un dato o una explicación puntual.
+"""
+
+
+        prompt = (
+            "Contexto financiero del usuario (datos privados de su propia cuenta):\n"
+            + json.dumps(financial_context, ensure_ascii=False)
+            + "\n\nPregunta del usuario:\n"
+            + user_message
+        )
+
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config={
+                "system_instruction": system_instructions,
+                "max_output_tokens": 500,
+                "temperature": 0.7
+            }
+        )
+
+        assistant_message = (response.text or "").strip()
+
+        if not assistant_message:
+            return jsonify({
+                "message": "No fue posible generar una respuesta. Intenta nuevamente."
+            }), 502
+
+        return jsonify({
+            "message": "Respuesta generada correctamente",
+            "reply": assistant_message
+        }), 200
+
+    except genai_errors.APIError as error:
+        status_code = getattr(error, "code", None)
+
+        if status_code == 429:
+            app.logger.warning(
+                "Gemini alcanzo el limite de solicitudes (HTTP 429)."
+            )
+            return jsonify({
+                "message": (
+                    "Se alcanzo el limite gratuito de solicitudes de Gemini. "
+                    "Espera un momento e intenta nuevamente."
+                )
+            }), 429
+
+        if status_code in (503, 504):
+            app.logger.warning(
+                "Gemini no esta disponible temporalmente (HTTP %s).",
+                status_code
+            )
+            response = jsonify({
+                "message": (
+                    "El asistente esta recibiendo muchas solicitudes o "
+                    "no esta disponible temporalmente. Espera unos segundos "
+                    "e intenta nuevamente."
+                )
+            })
+            response.headers["Retry-After"] = "10"
+            return response, 503
+
+        app.logger.exception("Gemini devolvio un error de API.")
+
+        if status_code in (400, 401, 403):
+            return jsonify({
+                "message": (
+                    "Gemini rechazo la solicitud. Verifica la clave API "
+                    "y la configuracion del modelo."
+                )
+            }), 503
+
+        return jsonify({
+            "message": "El servicio de IA presento un error. Intenta nuevamente."
+        }), 502
+
+    except Exception:
+        db.session.rollback()
+        app.logger.exception("Error inesperado en el endpoint del chatbot.")
+        return jsonify({
+            "message": "Ocurrio un error al procesar tu consulta."
+        }), 500
+
+
 # ==========================================
 # CREAR TABLAS DE LA BASE DE DATOS
 # ==========================================
 
+
 with app.app_context():
     db.create_all()
 
+    # Migracion: agregar ahorro acumulado a perfiles existentes.
+    inspector = inspect(db.engine)
+
+    profile_columns = {
+        column["name"]
+        for column in inspector.get_columns("user_profiles")
+    }
+
+    if "savings_accumulated" not in profile_columns:
+        with db.engine.begin() as connection:
+            connection.execute(db.text("""
+                ALTER TABLE user_profiles
+                ADD COLUMN savings_accumulated FLOAT NOT NULL DEFAULT 0
+            """))
+
+        app.logger.info(
+            "Migracion completada: savings_accumulated agregada."
+        )
 
 # ==========================================
 # EJECUTAR SERVIDOR

@@ -94,6 +94,10 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
       return;
     }
 
+    final description = _descriptionController.text.trim();
+    final transactionType = _transactionType;
+    final category = _category;
+
     setState(() {
       _isLoading = true;
     });
@@ -104,19 +108,19 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
           token: widget.token,
           transactionId: widget.transaction!.id,
           changes: {
-            'description': _descriptionController.text.trim(),
+            'description': description,
             'amount': amount,
-            'category': _category,
-            'transaction_type': _transactionType,
+            'category': category,
+            'transaction_type': transactionType,
           },
         );
       } else {
         await ApiService.createTransaction(
           token: widget.token,
-          description: _descriptionController.text.trim(),
+          description: description,
           amount: amount,
-          category: _category,
-          transactionType: _transactionType,
+          category: category,
+          transactionType: transactionType,
         );
       }
 
@@ -133,7 +137,18 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
         ),
       );
 
-      Navigator.pop(context, true);
+      // Al crear una transacción devolvemos sus datos a HomeScreen.
+      // Al editarla conservamos el resultado true que ya utilizaba la app.
+      if (_isEditing) {
+        Navigator.pop(context, true);
+      } else {
+        Navigator.pop(context, {
+          'type': transactionType,
+          'description': description,
+          'amount': amount,
+          'category': category,
+        });
+      }
     } catch (error) {
       if (!mounted) return;
 

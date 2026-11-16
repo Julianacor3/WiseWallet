@@ -59,6 +59,28 @@ class ApiService {
   }
 
   // ==========================================
+  // CHATBOT CON INTELIGENCIA ARTIFICIAL
+  // ==========================================
+
+  static Future<Map<String, dynamic>> sendChatbotMessage({
+    required String token,
+    required String message,
+  }) async {
+    final response = await http
+        .post(
+          Uri.parse('$baseUrl/api/chatbot'),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $token',
+          },
+          body: jsonEncode({'message': message}),
+        )
+        .timeout(const Duration(seconds: 90));
+
+    return _handleResponse(response);
+  }
+
+  // ==========================================
   // REGISTRO
   // ==========================================
 

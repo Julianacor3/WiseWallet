@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../services/api_service.dart';
 import 'home_screen.dart';
@@ -6,11 +7,13 @@ import 'home_screen.dart';
 class FinancialProfileScreen extends StatefulWidget {
   final String token;
   final Map<String, dynamic> user;
+  final bool isEditing;
 
   const FinancialProfileScreen({
     super.key,
     required this.token,
     required this.user,
+    this.isEditing = false,
   });
 
   @override
@@ -21,6 +24,7 @@ class _FinancialProfileScreenState extends State<FinancialProfileScreen> {
   final _formKey = GlobalKey<FormState>();
 
   final _savingsGoalController = TextEditingController();
+  final _savingsAccumulatedController = TextEditingController(text: '0');
 
   String? _occupation;
   String? _financialGoal;
@@ -30,15 +34,101 @@ class _FinancialProfileScreenState extends State<FinancialProfileScreen> {
   String? _mainChallenge;
 
   bool _isLoading = false;
+  bool _isLoadingProfile = false;
+  bool _profileLoadError = false;
 
   final Color _primaryColor = const Color(0xFFD5D2F0);
   final Color _backgroundColor = const Color(0xFFF5F1E4);
   final Color _textColor = const Color(0xFF2C3E50);
 
   @override
-  void dispose() {
-    _savingsGoalController.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+
+    if (widget.isEditing) {
+      _loadExistingProfile();
+    }
+  }
+
+  // ==========================================
+  // FORMATEAR CANTIDADES
+  // ==========================================
+
+  String _formatMoney(String value) {
+    final digits = value.replaceAll(RegExp(r'\D'), '');
+
+    if (digits.isEmpty) return '\$0';
+
+    final formatted = digits.replaceAllMapped(
+      RegExp(r'\B(?=(\d{3})+(?!\d))'),
+      (match) => '.',
+    );
+
+    return '\$$formatted';
+  }
+
+  // ==========================================
+  // CARGAR PERFIL EXISTENTE
+  // ==========================================
+
+  Future<void> _loadExistingProfile() async {
+    setState(() {
+      _isLoadingProfile = true;
+      _profileLoadError = false;
+    });
+
+    try {
+      final profileData = await ApiService.getProfile(token: widget.token);
+
+      final profileValue = profileData['profile'];
+
+      if (profileValue is! Map) {
+        throw Exception('No se encontró tu perfil financiero.');
+      }
+
+      final profile = Map<String, dynamic>.from(profileValue);
+
+      if (!mounted) return;
+
+      final accumulated = profile['savings_accumulated'];
+
+      setState(() {
+        _occupation = profile['occupation']?.toString();
+        _financialGoal = profile['financial_goal']?.toString();
+        _monthlyIncome = profile['monthly_income_range']?.toString();
+        _monthlyExpenses = profile['monthly_expense_range']?.toString();
+        _savingHabit = profile['saving_habit']?.toString();
+        _mainChallenge = profile['main_challenge']?.toString();
+
+        _savingsGoalController.text = profile['savings_goal']?.toString() ?? '';
+
+        _savingsAccumulatedController.text = accumulated == null
+            ? '0'
+            : (accumulated as num).round().toString();
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _profileLoadError = true;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'No fue posible cargar tu perfil: '
+            '${e.toString().replaceFirst('Exception: ', '')}',
+          ),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoadingProfile = false;
+        });
+      }
+    }
   }
 
   // ==========================================
@@ -53,6 +143,10 @@ class _FinancialProfileScreenState extends State<FinancialProfileScreen> {
     setState(() => _isLoading = true);
 
     try {
+      final accumulatedSavings = double.parse(
+        _savingsAccumulatedController.text.trim(),
+      );
+
       final profileData = {
         'occupation': _occupation!,
         'financial_goal': _financialGoal!,
@@ -61,6 +155,7 @@ class _FinancialProfileScreenState extends State<FinancialProfileScreen> {
         'saving_habit': _savingHabit!,
         'main_challenge': _mainChallenge!,
         'savings_goal': _savingsGoalController.text.trim(),
+        'savings_accumulated': accumulatedSavings,
       };
 
       await ApiService.saveProfile(
@@ -71,18 +166,26 @@ class _FinancialProfileScreenState extends State<FinancialProfileScreen> {
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Perfil financiero guardado correctamente'),
+        SnackBar(
+          content: Text(
+            widget.isEditing
+                ? 'Perfil financiero actualizado correctamente'
+                : 'Perfil financiero guardado correctamente',
+          ),
           backgroundColor: Colors.green,
         ),
       );
 
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => HomeScreen(token: widget.token, user: widget.user),
-        ),
-      );
+      if (widget.isEditing) {
+        Navigator.pop(context, true);
+      } else {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => HomeScreen(token: widget.token, user: widget.user),
+          ),
+        );
+      }
     } catch (e) {
       if (!mounted) return;
 
@@ -211,13 +314,142 @@ class _FinancialProfileScreenState extends State<FinancialProfileScreen> {
   }
 
   // ==========================================
+  // CAMPO DE AHORRO ACUMULADO
+  // ==========================================
+
+  Widget _buildAccumulatedSavingsField() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '8. ¿Cuánto dinero tienes ahorrado actualmente?',
+          style: TextStyle(
+            color: _textColor,
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 9),
+        TextFormField(
+          controller: _savingsAccumulatedController,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          decoration: InputDecoration(
+            filled: true,
+            fillColor: Colors.white,
+            prefixText: '\$ ',
+            hintText: 'Ejemplo: 1500000',
+            helperText:
+                'Valor registrado: ${_formatMoney(_savingsAccumulatedController.text)}',
+            helperMaxLines: 2,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 16,
+              vertical: 14,
+            ),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(18),
+              borderSide: BorderSide.none,
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(18),
+              borderSide: BorderSide.none,
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(18),
+              borderSide: BorderSide(color: _primaryColor, width: 2),
+            ),
+          ),
+          onChanged: (_) {
+            setState(() {});
+          },
+          validator: (value) {
+            if (value == null || value.trim().isEmpty) {
+              return 'Ingresa tu ahorro acumulado. Si no tienes ahorros, escribe 0.';
+            }
+
+            final amount = double.tryParse(value.trim());
+
+            if (amount == null || !amount.isFinite || amount < 0) {
+              return 'Ingresa una cantidad válida.';
+            }
+
+            return null;
+          },
+        ),
+        const SizedBox(height: 8),
+        const Text(
+          'Este valor es declarado por ti y puedes actualizarlo '
+          'cuando cambie tu ahorro. Si todavía no tienes ahorros, '
+          'deja el valor en 0.',
+          style: TextStyle(fontSize: 12, color: Colors.black54, height: 1.4),
+        ),
+      ],
+    );
+  }
+
+  // ==========================================
   // INTERFAZ DEL PERFIL FINANCIERO
   // ==========================================
 
   @override
   Widget build(BuildContext context) {
+    if (_isLoadingProfile) {
+      return const Scaffold(
+        backgroundColor: Colors.white,
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (_profileLoadError) {
+      return Scaffold(
+        backgroundColor: Colors.white,
+        appBar: AppBar(
+          title: const Text('Perfil financiero'),
+          backgroundColor: Colors.white,
+        ),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(25),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  Icons.error_outline,
+                  color: Colors.redAccent,
+                  size: 55,
+                ),
+                const SizedBox(height: 15),
+                const Text(
+                  'No fue posible cargar tu perfil financiero.',
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 20),
+                ElevatedButton.icon(
+                  onPressed: _loadExistingProfile,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Intentar nuevamente'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Volver'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: Colors.white,
+      appBar: widget.isEditing
+          ? AppBar(
+              title: const Text('Mi perfil financiero'),
+              backgroundColor: Colors.white,
+              foregroundColor: _textColor,
+              elevation: 0,
+            )
+          : null,
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
@@ -234,7 +466,9 @@ class _FinancialProfileScreenState extends State<FinancialProfileScreen> {
                   ),
                   const SizedBox(height: 15),
                   Text(
-                    'Conozcamos tus finanzas',
+                    widget.isEditing
+                        ? 'Actualiza tus finanzas'
+                        : 'Conozcamos tus finanzas',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 27,
@@ -243,12 +477,15 @@ class _FinancialProfileScreenState extends State<FinancialProfileScreen> {
                     ),
                   ),
                   const SizedBox(height: 10),
-                  const Text(
-                    'Cuéntanos un poco sobre ti y tus objetivos. '
-                    'Esta información nos ayudará a personalizar '
-                    'tu experiencia en Wise Wallet.',
+                  Text(
+                    widget.isEditing
+                        ? 'Puedes modificar tus respuestas y mantener '
+                              'actualizada tu información financiera.'
+                        : 'Cuéntanos un poco sobre ti y tus objetivos. '
+                              'Esta información nos ayudará a personalizar '
+                              'tu experiencia en Wise Wallet.',
                     textAlign: TextAlign.center,
-                    style: TextStyle(
+                    style: const TextStyle(
                       fontSize: 14,
                       color: Colors.black54,
                       height: 1.5,
@@ -368,6 +605,8 @@ class _FinancialProfileScreenState extends State<FinancialProfileScreen> {
                             hint: 'Ejemplo: Ahorrar \$3.000.000',
                             controller: _savingsGoalController,
                           ),
+                          const SizedBox(height: 20),
+                          _buildAccumulatedSavingsField(),
                           const SizedBox(height: 25),
                           SizedBox(
                             height: 50,
@@ -382,9 +621,11 @@ class _FinancialProfileScreenState extends State<FinancialProfileScreen> {
                               ),
                               child: _isLoading
                                   ? const CircularProgressIndicator()
-                                  : const Text(
-                                      'Guardar y continuar',
-                                      style: TextStyle(
+                                  : Text(
+                                      widget.isEditing
+                                          ? 'Guardar cambios'
+                                          : 'Guardar y continuar',
+                                      style: const TextStyle(
                                         fontSize: 15,
                                         fontWeight: FontWeight.bold,
                                       ),
@@ -409,5 +650,12 @@ class _FinancialProfileScreenState extends State<FinancialProfileScreen> {
         ),
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _savingsGoalController.dispose();
+    _savingsAccumulatedController.dispose();
+    super.dispose();
   }
 }

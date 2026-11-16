@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../services/api_service.dart';
+
 class ChatbotScreen extends StatefulWidget {
   final String token;
 
@@ -11,10 +13,11 @@ class ChatbotScreen extends StatefulWidget {
 
 class _ChatbotScreenState extends State<ChatbotScreen> {
   final TextEditingController _messageController = TextEditingController();
-
   final ScrollController _scrollController = ScrollController();
 
   final List<Map<String, dynamic>> _messages = [];
+
+  bool _isSending = false;
 
   @override
   void dispose() {
@@ -23,25 +26,105 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
     super.dispose();
   }
 
-  void _sendMessage() {
+  // Limpia Markdown, conserva los saltos de linea y presenta las listas
+  // con viñetas sencillas.
+  String _formatAssistantText(String text) {
+    final cleanedText = text
+        .replaceAll(RegExp(r'```[\s\S]*?```'), '')
+        .replaceAll(RegExp(r'^\s{0,3}#{1,6}\s*', multiLine: true), '')
+        .replaceAll('**', '')
+        .replaceAll('__', '')
+        .replaceAll('`', '')
+        .replaceAll(RegExp(r'^\s*[-*]\s+', multiLine: true), '• ')
+        .replaceAll(RegExp(r'^\s*\d+[.)]\s+', multiLine: true), '• ')
+        .replaceAll(RegExp(r'^\s*>\s?', multiLine: true), '')
+        .replaceAll('*', '')
+        .trim();
+
+    return _formatThousandsSeparators(cleanedText);
+  }
+
+  // Normaliza cantidades con o sin separadores de miles.
+  // Evita modificar fechas como 2026-11-16 y valores junto a fechas/horas.
+  String _formatThousandsSeparators(String text) {
+    final numberPattern = RegExp(
+      r'(?<![\d/:-])(?:\d{1,3}(?:[.,]\d{3})+|\d{4,})(?![\d/:-])',
+    );
+
+    return text.replaceAllMapped(numberPattern, (match) {
+      final number = match.group(0)!;
+      final digitsOnly = number.replaceAll(RegExp(r'[.,]'), '');
+
+      if (digitsOnly.length < 4) {
+        return number;
+      }
+
+      final formatted = digitsOnly.replaceAllMapped(
+        RegExp(r'\B(?=(\d{3})+(?!\d))'),
+        (_) => '.',
+      );
+
+      return formatted;
+    });
+  }
+
+  Future<void> _sendMessage() async {
     final message = _messageController.text.trim();
 
-    if (message.isEmpty) return;
+    if (message.isEmpty || _isSending) return;
 
     setState(() {
       _messages.add({'text': message, 'isUser': true});
-
-      _messages.add({
-        'text':
-            'Tu mensaje se registró correctamente. '
-            'La conexión con el asistente inteligente '
-            'se habilitará en la siguiente etapa.',
-        'isUser': false,
-      });
+      _isSending = true;
     });
 
     _messageController.clear();
+    _scrollToBottom();
 
+    try {
+      final response = await ApiService.sendChatbotMessage(
+        token: widget.token,
+        message: message,
+      );
+
+      final reply = (response['reply'] ?? '').toString().trim();
+
+      if (reply.isEmpty) {
+        throw Exception('El asistente no devolvio una respuesta.');
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        _messages.add({'text': _formatAssistantText(reply), 'isUser': false});
+      });
+    } catch (error) {
+      if (!mounted) return;
+
+      final errorMessage = error
+          .toString()
+          .replaceFirst('Exception: ', '')
+          .trim();
+
+      setState(() {
+        _messages.add({
+          'text':
+              'No pude obtener una respuesta en este momento. '
+              '$errorMessage\n\nPuedes intentarlo nuevamente.',
+          'isUser': false,
+        });
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+        });
+        _scrollToBottom();
+      }
+    }
+  }
+
+  void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
@@ -70,7 +153,91 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
         ),
         child: Text(
           message['text'] as String,
-          style: const TextStyle(fontSize: 15, color: Color(0xFF292638)),
+          style: const TextStyle(
+            fontSize: 15,
+            height: 1.5,
+            color: Color(0xFF292638),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTypingIndicator() {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 7),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 17,
+              height: 17,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Color(0xFF7569B5),
+              ),
+            ),
+            SizedBox(width: 10),
+            Text(
+              'Wise Assistant está pensando...',
+              style: TextStyle(fontSize: 13, color: Color(0xFF292638)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWelcome() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(25),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const CircleAvatar(
+              radius: 42,
+              backgroundColor: Color(0xFFEAE7F8),
+              child: Icon(
+                Icons.smart_toy_outlined,
+                size: 45,
+                color: Color(0xFF7569B5),
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              '¡Hola! Soy Wise Assistant',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF2C3E50),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Estoy aquí para ayudarte a organizar '
+              'tus finanzas, comprender tus gastos '
+              'y trabajar hacia tus metas financieras.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 15, color: Colors.grey.shade600),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              '¿Qué te gustaría consultar?',
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF7569B5),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -105,59 +272,16 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
         children: [
           Expanded(
             child: _messages.isEmpty
-                ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(25),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const CircleAvatar(
-                            radius: 42,
-                            backgroundColor: Color(0xFFEAE7F8),
-                            child: Icon(
-                              Icons.smart_toy_outlined,
-                              size: 45,
-                              color: Color(0xFF7569B5),
-                            ),
-                          ),
-                          const SizedBox(height: 20),
-                          const Text(
-                            '¡Hola! Soy Wise Assistant',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
-                              color: Color(0xFF2C3E50),
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          Text(
-                            'Estoy aquí para ayudarte a organizar '
-                            'tus finanzas, comprender tus gastos '
-                            'y trabajar hacia tus metas financieras.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 15,
-                              color: Colors.grey.shade600,
-                            ),
-                          ),
-                          const SizedBox(height: 20),
-                          const Text(
-                            '¿Qué te gustaría consultar?',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w600,
-                              color: Color(0xFF7569B5),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  )
+                ? _buildWelcome()
                 : ListView.builder(
                     controller: _scrollController,
                     padding: const EdgeInsets.all(16),
-                    itemCount: _messages.length,
+                    itemCount: _messages.length + (_isSending ? 1 : 0),
                     itemBuilder: (context, index) {
+                      if (index == _messages.length && _isSending) {
+                        return _buildTypingIndicator();
+                      }
+
                       return _buildMessage(_messages[index]);
                     },
                   ),
@@ -196,8 +320,17 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
                 CircleAvatar(
                   backgroundColor: const Color(0xFF7569B5),
                   child: IconButton(
-                    onPressed: _sendMessage,
-                    icon: const Icon(Icons.send, color: Colors.white, size: 20),
+                    onPressed: _isSending ? null : _sendMessage,
+                    icon: _isSending
+                        ? const SizedBox(
+                            width: 19,
+                            height: 19,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(Icons.send, color: Colors.white, size: 20),
                     tooltip: 'Enviar mensaje',
                   ),
                 ),

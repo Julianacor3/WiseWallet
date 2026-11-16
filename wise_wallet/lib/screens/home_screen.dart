@@ -11,6 +11,8 @@ import 'calendar_screen.dart';
 import 'payment_methods_screen.dart';
 import 'financial_history_screen.dart';
 import 'notifications_screen.dart';
+import 'financial_profile_screen.dart';
+import 'statistics_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   final String token;
@@ -25,12 +27,11 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   late Future<List<TransactionModel>> _transactionsFuture;
   late Future<List<ObligationModel>> _obligationsFuture;
+  late Future<Map<String, dynamic>> _profileFuture;
 
-  final NumberFormat _moneyFormat = NumberFormat.currency(
-    locale: 'es_CO',
-    symbol: '\$ ',
-    decimalDigits: 2,
-  );
+  Map<String, dynamic>? _assistantSuggestion;
+
+  final NumberFormat _moneyFormat = NumberFormat('#,##0', 'es_CO');
 
   static const Color primaryColor = Color(0xFF7569B5);
   static const Color darkColor = Color(0xFF292638);
@@ -41,6 +42,7 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _loadTransactions();
     _loadObligations();
+    _loadProfile();
   }
 
   void _loadTransactions() {
@@ -58,6 +60,10 @@ class _HomeScreenState extends State<HomeScreen> {
         });
   }
 
+  void _loadProfile() {
+    _profileFuture = ApiService.getProfile(token: widget.token);
+  }
+
   void _refreshTransactions() {
     setState(() {
       _loadTransactions();
@@ -73,7 +79,333 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   String _formatMoney(double amount) {
-    return _moneyFormat.format(amount);
+    return '\$${_moneyFormat.format(amount)}';
+  }
+
+  // ==========================================
+  // SUGERENCIA PROACTIVA DE WISE ASSISTANT
+  // ==========================================
+
+  Future<void> _showAssistantSuggestion(Map<String, dynamic> movement) async {
+    final type = (movement['type'] ?? '').toString().toLowerCase();
+    final description = (movement['description'] ?? '').toString().trim();
+    final category = (movement['category'] ?? '').toString().trim();
+    final amountValue = movement['amount'];
+
+    final amount = amountValue is num
+        ? amountValue.toDouble()
+        : double.tryParse(amountValue?.toString() ?? '') ?? 0;
+
+    // Consultar el perfil financiero.
+    Map<String, dynamic>? profile;
+
+    try {
+      final profileData = await _profileFuture;
+      final profileValue = profileData['profile'];
+
+      if (profileValue is Map) {
+        profile = Map<String, dynamic>.from(profileValue);
+      }
+    } catch (_) {
+      profile = null;
+    }
+
+    // Consultar las obligaciones registradas.
+    List<ObligationModel> obligations = [];
+
+    try {
+      obligations = await _obligationsFuture;
+    } catch (_) {
+      obligations = [];
+    }
+
+    final pendingObligations = obligations
+        .where((obligation) => obligation.isPending)
+        .toList();
+
+    final overdueObligations = pendingObligations
+        .where((obligation) => obligation.isOverdue)
+        .toList();
+
+    final pendingTotal = pendingObligations.fold<double>(
+      0,
+      (total, obligation) => total + obligation.amount,
+    );
+
+    final overdueTotal = overdueObligations.fold<double>(
+      0,
+      (total, obligation) => total + obligation.amount,
+    );
+
+    // Obtener la meta de ahorro.
+    final savingsGoalText = (profile?['savings_goal'] ?? '').toString();
+    final goalMatch = RegExp(r'\d[\d.,]*').firstMatch(savingsGoalText);
+
+    double? savingsGoal;
+
+    if (goalMatch != null) {
+      final digits = goalMatch.group(0)!.replaceAll(RegExp(r'[^0-9]'), '');
+      final parsedGoal = double.tryParse(digits);
+
+      if (parsedGoal != null && parsedGoal > 0) {
+        savingsGoal = parsedGoal;
+      }
+    }
+
+    // Obtener el ahorro acumulado declarado por el usuario.
+    final accumulatedValue = profile?['savings_accumulated'];
+
+    double? savingsAccumulated;
+
+    if (accumulatedValue is num) {
+      savingsAccumulated = accumulatedValue.toDouble();
+    } else if (accumulatedValue != null) {
+      savingsAccumulated = double.tryParse(accumulatedValue.toString());
+    }
+
+    if (savingsAccumulated != null &&
+        (!savingsAccumulated.isFinite || savingsAccumulated < 0)) {
+      savingsAccumulated = null;
+    }
+
+    // Calcular el progreso de ahorro.
+    String? savingsProgressMessage;
+
+    if (savingsGoal != null && savingsAccumulated != null) {
+      final remaining = savingsGoal - savingsAccumulated;
+      final percentage = (savingsAccumulated / savingsGoal) * 100;
+
+      if (remaining > 0) {
+        savingsProgressMessage =
+            'Tu ahorro acumulado es de ${_formatMoney(savingsAccumulated)} '
+            'y llevas un avance del ${percentage.toStringAsFixed(1)}% '
+            'de tu meta. Te faltan ${_formatMoney(remaining)} para alcanzarla.';
+      } else if (remaining == 0) {
+        savingsProgressMessage =
+            '¡Ya alcanzaste tu meta de ahorro de ${_formatMoney(savingsGoal)}! '
+            'Tu ahorro acumulado es de ${_formatMoney(savingsAccumulated)}.';
+      } else {
+        savingsProgressMessage =
+            '¡Has superado tu meta de ahorro! '
+            'Tu ahorro acumulado es de ${_formatMoney(savingsAccumulated)}, '
+            'superando la meta de ${_formatMoney(savingsGoal)} '
+            'por ${_formatMoney(remaining.abs())}.';
+      }
+    }
+
+    final movementText = '$description $category'.toLowerCase();
+
+    final isLoan = RegExp(r'\b(prestamo|pr[eé]stamo|credito|cr[eé]dito)\b')
+        .hasMatch(movementText);
+
+    final hasPending = pendingObligations.isNotEmpty;
+    final hasOverdue = overdueObligations.isNotEmpty;
+
+    String title;
+    String message;
+    IconData icon;
+
+    // INGRESO IDENTIFICADO COMO PRÉSTAMO.
+    if (type == 'ingreso' && isLoan) {
+      title = 'Ten presente este préstamo';
+
+      message =
+          'Registraste ${_formatMoney(amount)} como ingreso, '
+          'pero si corresponde a un préstamo, recuerda que es dinero '
+          'que tendrás que devolver y no un ingreso propio.';
+
+      if (hasOverdue) {
+        message +=
+            ' Además, tienes ${overdueObligations.length} obligaciones '
+            'vencidas por ${_formatMoney(overdueTotal)}. '
+            'Conviene priorizar esos compromisos.';
+      } else if (hasPending) {
+        message +=
+            ' También tienes ${pendingObligations.length} obligaciones '
+            'pendientes por ${_formatMoney(pendingTotal)}.';
+      }
+
+      if (savingsProgressMessage != null) {
+        message += ' $savingsProgressMessage';
+      }
+
+      icon = Icons.info_outline_rounded;
+    }
+    // INGRESO NORMAL.
+    else if (type == 'ingreso') {
+      title = 'Un ingreso registrado';
+
+      if (hasOverdue) {
+        message =
+            'Registraste ${_formatMoney(amount)}. Tienes '
+            '${overdueObligations.length} obligaciones vencidas '
+            'por ${_formatMoney(overdueTotal)}. '
+            'Te recomendamos priorizar esos pagos antes de destinar '
+            'dinero adicional al ahorro.';
+      } else if (hasPending) {
+        message =
+            'Registraste ${_formatMoney(amount)}. Tienes '
+            '${pendingObligations.length} obligaciones pendientes '
+            'por ${_formatMoney(pendingTotal)}. '
+            'Considera tus próximos pagos antes de distribuir este dinero.';
+      } else {
+        message =
+            'Registraste ${_formatMoney(amount)}. '
+            'Recuerda organizar este ingreso teniendo en cuenta '
+            'tus compromisos y tus objetivos financieros.';
+      }
+
+      if (savingsProgressMessage != null) {
+        message += ' $savingsProgressMessage';
+      } else if (savingsGoal != null) {
+        message += ' Tu meta de ahorro es de ${_formatMoney(savingsGoal)}.';
+      }
+
+      if (hasOverdue || hasPending) {
+        message +=
+            ' Procura mantener tus obligaciones al día '
+            'antes de aumentar tus aportes de ahorro.';
+      } else if (savingsGoal != null &&
+          savingsAccumulated != null &&
+          savingsAccumulated >= savingsGoal) {
+        message +=
+            ' Puedes establecer una nueva meta o mantener '
+            'el hábito de ahorro que has construido.';
+      } else {
+        message +=
+            ' Mantén aportes graduales y constantes '
+            'según tus posibilidades.';
+      }
+
+      icon = Icons.trending_up_rounded;
+    }
+    // GASTO.
+    else {
+      title = 'Un gasto registrado';
+
+      final categoryText = category.isEmpty ? 'esta categoría' : category;
+
+      message =
+          'Registraste ${_formatMoney(amount)} en $categoryText. '
+          'Ten presente este valor al revisar tu balance '
+          'y planear tus próximos pagos.';
+
+      if (hasOverdue) {
+        message +=
+            ' Tienes ${overdueObligations.length} obligaciones vencidas '
+            'por ${_formatMoney(overdueTotal)}. '
+            'Conviene priorizar esos pagos.';
+      } else if (hasPending) {
+        message +=
+            ' También tienes ${pendingObligations.length} obligaciones '
+            'pendientes por ${_formatMoney(pendingTotal)}.';
+      }
+
+      if (savingsProgressMessage != null) {
+        message += ' $savingsProgressMessage';
+      } else if (savingsGoal != null) {
+        message +=
+            ' Recuerda tu meta de ahorro de ${_formatMoney(savingsGoal)} '
+            'al organizar tus próximos gastos.';
+      }
+
+      if (hasOverdue || hasPending) {
+        message +=
+            ' Procura mantener tus obligaciones al día '
+            'antes de aumentar tus aportes de ahorro.';
+      }
+
+      icon = Icons.trending_down_rounded;
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      _assistantSuggestion = {'title': title, 'message': message, 'icon': icon};
+    });
+  }
+
+  void _dismissAssistantSuggestion() {
+    setState(() {
+      _assistantSuggestion = null;
+    });
+  }
+
+  Widget _buildAssistantSuggestionCard() {
+    final suggestion = _assistantSuggestion!;
+
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 300),
+      child: Material(
+        color: Colors.white,
+        elevation: 8,
+        borderRadius: BorderRadius.circular(17),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(13, 11, 5, 11),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(17),
+            border: Border.all(color: primaryColor.withValues(alpha: 0.25)),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                suggestion['icon'] as IconData,
+                color: primaryColor,
+                size: 25,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: _openChatbot,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 3),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          suggestion['title'] as String,
+                          style: const TextStyle(
+                            color: darkColor,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          suggestion['message'] as String,
+                          style: const TextStyle(
+                            color: Colors.black87,
+                            fontSize: 11,
+                            height: 1.35,
+                          ),
+                        ),
+                        const SizedBox(height: 5),
+                        const Text(
+                          'Toca para conversar con Wise Assistant',
+                          style: TextStyle(
+                            color: primaryColor,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Cerrar sugerencia',
+                visualDensity: VisualDensity.compact,
+                onPressed: _dismissAssistantSuggestion,
+                icon: const Icon(Icons.close, size: 18, color: Colors.grey),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   // ==========================================
@@ -265,7 +597,12 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
 
-    if (result == true && mounted) {
+    if (!mounted) return;
+
+    if (result is Map) {
+      _refreshTransactions();
+      _showAssistantSuggestion(Map<String, dynamic>.from(result));
+    } else if (result == true) {
       _refreshTransactions();
     }
   }
@@ -275,6 +612,10 @@ class _HomeScreenState extends State<HomeScreen> {
   // ==========================================
 
   void _openChatbot() {
+    if (_assistantSuggestion != null) {
+      _dismissAssistantSuggestion();
+    }
+
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => ChatbotScreen(token: widget.token)),
@@ -285,10 +626,50 @@ class _HomeScreenState extends State<HomeScreen> {
   // ABRIR CALENDARIO
   // ==========================================
 
-  void _openCalendar() {
-    Navigator.push(
+  Future<void> _openCalendar() async {
+    await Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => CalendarScreen(token: widget.token)),
+    );
+
+    if (!mounted) return;
+
+    setState(() {
+      _loadObligations();
+      _assistantSuggestion = null;
+    });
+  }
+
+  Future<void> _openFinancialProfile() async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FinancialProfileScreen(
+          token: widget.token,
+          user: widget.user,
+          isEditing: true,
+        ),
+      ),
+    );
+
+    if (!mounted) return;
+
+    if (result == true) {
+      setState(() {
+        _loadProfile();
+        _assistantSuggestion = null;
+      });
+    }
+  }
+
+  // ==========================================
+  // ABRIR ESTADÍSTICAS FINANCIERAS
+  // ==========================================
+
+  void _openStatistics() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => StatisticsScreen(token: widget.token)),
     );
   }
 
@@ -545,6 +926,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       backgroundColor: backgroundColor,
       appBar: AppBar(
+        automaticallyImplyLeading: false,
         elevation: 0,
         backgroundColor: backgroundColor,
         foregroundColor: darkColor,
@@ -557,6 +939,12 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
         actions: [
+          // PERFIL FINANCIERO
+          IconButton(
+            tooltip: 'Mi perfil financiero',
+            onPressed: _openFinancialProfile,
+            icon: const Icon(Icons.account_circle_outlined),
+          ),
           // CAMPANA DE NOTIFICACIONES
           FutureBuilder<List<ObligationModel>>(
             future: _obligationsFuture,
@@ -619,14 +1007,24 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
 
-      // CHATBOT FLOTANTE
-      floatingActionButton: FloatingActionButton(
-        onPressed: _openChatbot,
-        backgroundColor: primaryColor,
-        foregroundColor: Colors.white,
-        elevation: 5,
-        tooltip: 'Abrir Wise Assistant',
-        child: const Icon(Icons.smart_toy_outlined, size: 29),
+      // CHATBOT FLOTANTE Y SUGERENCIA PROACTIVA
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (_assistantSuggestion != null) ...[
+            _buildAssistantSuggestionCard(),
+            const SizedBox(height: 12),
+          ],
+          FloatingActionButton(
+            onPressed: _openChatbot,
+            backgroundColor: primaryColor,
+            foregroundColor: Colors.white,
+            elevation: 5,
+            tooltip: 'Abrir Wise Assistant',
+            child: const Icon(Icons.smart_toy_outlined, size: 29),
+          ),
+        ],
       ),
 
       body: FutureBuilder<List<TransactionModel>>(
@@ -890,6 +1288,14 @@ class _HomeScreenState extends State<HomeScreen> {
                             icon: Icons.history,
                             color: const Color(0xFFDB9140),
                             onTap: _openFinancialHistory,
+                          ),
+                          _buildModuleCard(
+                            title: 'Estadísticas financieras',
+                            description:
+                                'Visualiza tu ahorro, ingresos y gastos.',
+                            icon: Icons.bar_chart_rounded,
+                            color: const Color(0xFF8B78B8),
+                            onTap: _openStatistics,
                           ),
                         ],
                       ),
