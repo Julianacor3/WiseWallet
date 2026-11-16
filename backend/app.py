@@ -1429,9 +1429,10 @@ RECOMENDACIONES
 
         if status_code in (503, 504):
             app.logger.warning(
-                "Gemini no esta disponible temporalmente (HTTP %s).",
-                status_code
-            )
+    "Gemini no esta disponible temporalmente (HTTP %s): %s",
+    status_code,
+    getattr(error, "message", str(error))
+)
             response = jsonify({
                 "message": (
                     "El asistente esta recibiendo muchas solicitudes o "
