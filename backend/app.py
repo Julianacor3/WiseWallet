@@ -6,6 +6,7 @@ import math
 import os
 import json
 from sqlalchemy import inspect
+from google.genai import types
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -43,6 +44,7 @@ if not SECRET_KEY or len(SECRET_KEY) < 32:
 
 app.config["SECRET_KEY"] = SECRET_KEY
 
+
 # ==========================================
 # CONFIGURACION DE GEMINI
 # ==========================================
@@ -51,7 +53,15 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
 gemini_client = (
-    genai.Client(api_key=GEMINI_API_KEY)
+    genai.Client(
+        api_key=GEMINI_API_KEY,
+        http_options=types.HttpOptions(
+            timeout=45000,
+            retry_options=types.HttpRetryOptions(
+                attempts=1
+            )
+        )
+    )
     if GEMINI_API_KEY
     else None
 )

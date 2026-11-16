@@ -26,6 +26,12 @@ class ApiService {
     }
 
     if (defaultTargetPlatform == TargetPlatform.android) {
+      // En el APK de producción se utiliza Render.
+      // En desarrollo se utiliza el backend local.
+      if (kReleaseMode) {
+        return _productionUrl;
+      }
+
       return 'http://192.168.1.7:5000';
     }
 
